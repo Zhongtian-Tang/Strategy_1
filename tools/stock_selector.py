@@ -40,16 +40,18 @@ class DataFetcher:
         """
         return pd.read_sql(query, self.conn)
     
-    def get_calender_data(self, start_date: str, end_date: str, secumarket: List[int] = [83, 90], endlevel: str = 'Week'):
+    def get_calender_data(self, start_date: str, end_date: str, secumarket: List[int] = [83], endlevel: list[int] = ['(1,2)','(1,2)','(1,2)','(1,2)']):
         """
         获取交易日历数据
+        endlevel 为列表元组,不加限制条件就是(1,2)
         """
         query = f"""
-        SELECT TradingDate, IfTradingDay, If{endlevel}End
+        SELECT TradingDate AS TradingDay
         FROM JYDB.QT_TradingDayNew
         WHERE TradingDay >= TO_TIMESTAMP('{start_date}', 'YYYY-MM-DD HH24:MI:SS.FF')
         AND TradingDay <= TO_TIMESTAMP('{end_date}', 'YYYY-MM-DD HH24:MI:SS.FF')
-        AND SecuMarket IN {{','.join(map(str, secumarket))}}
+        AND IfTradingDay = 1 AND IfWeekEnd IN {endlevel[0]} AND IfMonthEnd IN {endlevel[1]} AND IfQuarterEnd IN {endlevel[2]} AND IfYearEnd IN {endlevel[3]}
+        AND SecuMarket IN {secumarket}
         ORDER BY TradingDay
         """
         return pd.read_sql(query, self.conn)
@@ -84,56 +86,12 @@ class DataFetcher:
         获取股票每月末交易日的前一年日均市值数据
         """
         query_zb = f"""
-        WITH MonthlyLastTrade AS (
-            SELECT TradingDate AS LAST_TRADE_DAY
-            FROM JYDB.QT_TradingDayNew
-            WHERE IfTradingDay = 1 AND IfMonthEnd = 1 AND SecuMarket IN 83
-            AND EXTRACT(YEAR FROM TradingDate) BETWEEN {start_year} AND {end_year}
-            ),
-            YearlyData AS (
-            SELECT
-            m.LAST_TRADE_DAY,
-            s.INNERCODE,
-            s.TRADINGDAY,
-            s.TOTALMV
-            FROM MonthlyLastTrade m
-            JOIN JYDB.QT_STOCKPERFORMANCE s
-            ON m.LAST_TRADE_DAY = s.TRADINGDAY
-            ),
-            AVGMarket AS (
-            SELECT
-            y.INNERCODE,
-            y.LAST_TRADE_DAY,
-            AVG(y.TOTALMV) OVER (PARTITION BY y.INNERCODE ORDER BY y.LAST_TRADE_DAY ROWS BETWEEN 11 PRECEDING AND CURRENT ROW) AS avg_market_past_year
-            FROM YearlyData y
-            )
-            SELECT * FROM AVGMarket
+        SELECT TRADINGDAY, INNERCODE, TOTALMV FROM JYDB.QT_StockPerformance
+        WHERE EXTRACT(YEAR FROM TRADINGDAY) BETWEEN {start_year} AND {end_year}
         """
         query_kc = f"""
-        WITH MonthlyLastTrade AS (
-            SELECT TradingDate AS LAST_TRADE_DAY
-            FROM JYDB.QT_TradingDayNew
-            WHERE IfTradingDay = 1 AND IfMonthEnd = 1 AND SecuMarket IN 83
-            AND EXTRACT(YEAR FROM TradingDate) BETWEEN {start_year} AND {end_year}
-            ),
-            YearlyData AS (
-            SELECT
-            m.LAST_TRADE_DAY,
-            s.INNERCODE,
-            s.TRADINGDAY,
-            s.TOTALMV
-            FROM MonthlyLastTrade m
-            JOIN JYDB.LC_STIBPerformance s
-            ON m.LAST_TRADE_DAY = s.TRADINGDAY
-            ),
-            AVGMarket AS (
-            SELECT
-            y.INNERCODE,
-            y.LAST_TRADE_DAY,
-            AVG(y.TOTALMV) OVER (PARTITION BY y.INNERCODE ORDER BY y.LAST_TRADE_DAY ROWS BETWEEN 11 PRECEDING AND CURRENT ROW) AS avg_market_past_year
-            FROM YearlyData y
-            )
-            SELECT * FROM AVGMarket
+        SELECT TRADINGDAY, INNERCODE, TOTALMV FROM JYDB.LC_STIBPerformance
+        WHERE EXTRACT(YEAR FROM TRADINGDAY) BETWEEN {start_year} AND {end_year}
         """
         df_zb = pd.read_sql(query_zb, self.conn)
         df_kc = pd.read_sql(query_kc, self.conn)
@@ -185,13 +143,30 @@ class DataHandler:
         处理市值数据, 返还csv表格
         """
         mkv_data = DataFetcher().get_mkv_data(start_year, end_year)
-        df_final = pd.merge(mkv_data, stock_pool, on='innercode', how='inner')[['wind_code', 'last_trade_day', 'avg_market_past_year']]
-        df_final['avg_market_past_year'] = df_final['avg_market_past_year'].apply(lambda x: '{:.2f}'.format(x))
-        df_final['last_trade_day'] = df_final['last_trade_day'].astype(str)
-        df_final['last_trade_day'] = df_final['last_trade_day'].apply(lambda x: x.replace('-', ''))
-        df_final = df_final.pivot(index='wind_code', columns='last_trade_day', values='avg_market_past_year')
-        df_final = df_final.fillna('')
+        def get_avg_mkv(df: pd.DataFrame):
+            df_sorted = df.sort_values(by=['innercode', 'tradingday'])
+            df_sorted['avg_market_past_year'] = df_sorted.groupby('innercode')['totalmv'].rolling(window=252,min_periods=1).mean().reset_index(level=0,drop=True)
+            return df_sorted
+        mkv_data = get_avg_mkv(mkv_data)
+        calender = DataFetcher().get_trading_calender(str(start_year)+'-01-01', str(end_year)+'-01-01')
+        step_1 = pd.merge(mkv_data, stock_pool, on='innercode', how='inner')
+        step_2 = pd.merge(step_1, calender, on='tradingday', how='inner')[['wind_code', 'tradingday', 'avg_market_past_year']]
+        step_2['avg_market_past_year'] = step_2['avg_market_past_year'].apply(lambda x: '{:.2f}'.format(x))
+        step_2['tradingday'] = step_2['tradingday'].astype(str)
+        df_final['tradingday'] = df_final['tradingday'].apply(lambda x: x.replace('-', ''))
+        df_final = df_final.pivot(index='wind_code', columns='tradingday', values='avg_market_past_year')
+        # df_final = df_final.fillna('')
+        df_final.columns.name = None
+        df_final = df_final.astype(np.float64)
         return df_final
+    
+    def mv_rank(self, df: pd.DataFrame, ratio: float = 0.8):
+        """
+        对市值数据进行排序
+        """
+        top_80_percent_stock = df.apply(lambda col: col[col > col.quantile(ratio)].index, axis=0)
+        top_80_percent_stock_df = top_80_percent_stock.apply(pd.Series).T
+        return top_80_percent_stock_df
 
         
 
