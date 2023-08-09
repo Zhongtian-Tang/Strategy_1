@@ -84,7 +84,13 @@ class DataFetcher:
         获取股票每月末交易日的前一年日均市值数据
         """
         query_zb = f"""
-        WITH MonthlyLastTrade AS (
+        WITH ALLTradingDays AS (
+            SELECT TradingDay, INNERCODE, TOTALMV
+            FROM JYDB.QT_STOCKPERFORMANCE s
+            WHERE SecuMarket IN 83
+            AND EXTRACT(YEAR FROM TradingDay) BETWEEN {start_year} AND {end_year}
+            ),
+            MonthlyLastTrade AS (
             SELECT TradingDate AS LAST_TRADE_DAY
             FROM JYDB.QT_TradingDayNew
             WHERE IfTradingDay = 1 AND IfMonthEnd = 1 AND SecuMarket IN 83
@@ -93,24 +99,30 @@ class DataFetcher:
             YearlyData AS (
             SELECT
             m.LAST_TRADE_DAY,
-            s.INNERCODE,
-            s.TRADINGDAY,
-            s.TOTALMV
+            a.INNERCODE,
+            a.TRADINGDAY,
+            a.TOTALMV
             FROM MonthlyLastTrade m
-            JOIN JYDB.QT_STOCKPERFORMANCE s
-            ON m.LAST_TRADE_DAY = s.TRADINGDAY
+            JOIN ALLTradingDays a
+            ON a.TradingDay <= m.LAST_TRADE_DAY AND a.TradingDay >= DATE_SUB(m.LAST_TRADE_DAY, INTERVAL 1 YEAR)
             ),
             AVGMarket AS (
             SELECT
             y.INNERCODE,
             y.LAST_TRADE_DAY,
-            AVG(y.TOTALMV) OVER (PARTITION BY y.INNERCODE ORDER BY y.LAST_TRADE_DAY ROWS BETWEEN 11 PRECEDING AND CURRENT ROW) AS avg_market_past_year
+            AVG(y.TOTALMV) OVER (PARTITION BY y.INNERCODE, y.LAST_TRADE_DAY) AS avg_market_past_year
             FROM YearlyData y
             )
             SELECT * FROM AVGMarket
         """
         query_kc = f"""
-        WITH MonthlyLastTrade AS (
+        WITH ALLTradingDays AS (
+            SELECT TradingDay, INNERCODE, TOTALMV
+            FROM JYDB.LC_STIBPerformance s
+            WHERE SecuMarket IN 83
+            AND EXTRACT(YEAR FROM TradingDay) BETWEEN {start_year} AND {end_year}
+            ),
+            MonthlyLastTrade AS (
             SELECT TradingDate AS LAST_TRADE_DAY
             FROM JYDB.QT_TradingDayNew
             WHERE IfTradingDay = 1 AND IfMonthEnd = 1 AND SecuMarket IN 83
@@ -119,18 +131,18 @@ class DataFetcher:
             YearlyData AS (
             SELECT
             m.LAST_TRADE_DAY,
-            s.INNERCODE,
-            s.TRADINGDAY,
-            s.TOTALMV
+            a.INNERCODE,
+            a.TRADINGDAY,
+            a.TOTALMV
             FROM MonthlyLastTrade m
-            JOIN JYDB.LC_STIBPerformance s
-            ON m.LAST_TRADE_DAY = s.TRADINGDAY
+            JOIN ALLTradingDays a
+            ON a.TradingDay <= m.LAST_TRADE_DAY AND a.TradingDay >= DATE_SUB(m.LAST_TRADE_DAY, INTERVAL 1 YEAR)
             ),
             AVGMarket AS (
             SELECT
             y.INNERCODE,
             y.LAST_TRADE_DAY,
-            AVG(y.TOTALMV) OVER (PARTITION BY y.INNERCODE ORDER BY y.LAST_TRADE_DAY ROWS BETWEEN 11 PRECEDING AND CURRENT ROW) AS avg_market_past_year
+            AVG(y.TOTALMV) OVER (PARTITION BY y.INNERCODE, y.LAST_TRADE_DAY) AS avg_market_past_year
             FROM YearlyData y
             )
             SELECT * FROM AVGMarket
@@ -190,7 +202,7 @@ class DataHandler:
         df_final['last_trade_day'] = df_final['last_trade_day'].astype(str)
         df_final['last_trade_day'] = df_final['last_trade_day'].apply(lambda x: x.replace('-', ''))
         df_final = df_final.pivot(index='wind_code', columns='last_trade_day', values='avg_market_past_year')
-        df_final = df_final.fillna('')
+        # df_final = df_final.fillna('')
         return df_final
 
         
