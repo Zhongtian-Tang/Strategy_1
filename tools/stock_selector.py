@@ -40,7 +40,7 @@ class DataFetcher:
         """
         return pd.read_sql(query, self.conn)
     
-    def get_calender_data(self, start_date: str, end_date: str, secumarket: List[int] = [83], endlevel: list[int] = ['(1,2)','(1,2)','(1,2)','(1,2)']):
+    def get_calender_data(self, start_date: str, end_date: str, secumarket: List[int] = [(83)], endlevel: list = [(1,2),(1,2),(1,2),(1,2)]):
         """
         获取交易日历数据
         endlevel 为列表元组,不加限制条件就是(1,2)
@@ -48,11 +48,11 @@ class DataFetcher:
         query = f"""
         SELECT TradingDate AS TradingDay
         FROM JYDB.QT_TradingDayNew
-        WHERE TradingDay >= TO_TIMESTAMP('{start_date}', 'YYYY-MM-DD HH24:MI:SS.FF')
-        AND TradingDay <= TO_TIMESTAMP('{end_date}', 'YYYY-MM-DD HH24:MI:SS.FF')
+        WHERE TradingDate >= TO_TIMESTAMP('{start_date}', 'YYYY-MM-DD HH24:MI:SS.FF')
+        AND TradingDate <= TO_TIMESTAMP('{end_date}', 'YYYY-MM-DD HH24:MI:SS.FF')
         AND IfTradingDay = 1 AND IfWeekEnd IN {endlevel[0]} AND IfMonthEnd IN {endlevel[1]} AND IfQuarterEnd IN {endlevel[2]} AND IfYearEnd IN {endlevel[3]}
-        AND SecuMarket IN {secumarket}
-        ORDER BY TradingDay
+        AND SecuMarket = 83
+        ORDER BY TradingDate
         """
         return pd.read_sql(query, self.conn)
 
@@ -83,7 +83,7 @@ class DataFetcher:
     
     def get_mkv_data(self, start_year: int, end_year:int):
         """
-        获取股票每月末交易日的前一年日均市值数据
+        获取股票市值数据
         """
         query_zb = f"""
         SELECT TRADINGDAY, INNERCODE, TOTALMV FROM JYDB.QT_StockPerformance
@@ -92,6 +92,42 @@ class DataFetcher:
         query_kc = f"""
         SELECT TRADINGDAY, INNERCODE, TOTALMV FROM JYDB.LC_STIBPerformance
         WHERE EXTRACT(YEAR FROM TRADINGDAY) BETWEEN {start_year} AND {end_year}
+        """
+        df_zb = pd.read_sql(query_zb, self.conn)
+        df_kc = pd.read_sql(query_kc, self.conn)
+        df_final = pd.concat([df_zb, df_kc], axis=0)
+        return df_final
+    
+    def get_turnoverV_data(self, start_year: int, end_year: int):
+        query_zb = f"""
+        WITH MonthData AS (
+        SELECT TRADINGDATE AS TRADINGDAY
+        FROM JYDB.QT_TradingDayNew
+        WHERE EXTRACT(YEAR FROM TRADINGDATE) BETWEEN {start_year} AND {end_year}
+        AND IfTradingDay = 1 AND IfMonthEnd = 1
+        AND SecuMarket = 83
+        ORDER BY TRADINGDATE
+        )
+        SELECT m.TRADINGDAY, p.INNERCODE, p.TurnoverValuePDayRY
+        FROM MonthData m
+        JOIN JYDB.QT_StockPerformance p
+        ON m.TRADINGDAY = p.TRADINGDAY
+        ORDER BY m.TRADINGDAY, p.INNERCODE
+        """
+        query_kc = f"""
+        WITH MonthData AS (
+        SELECT TRADINGDATE AS TRADINGDAY
+        FROM JYDB.QT_TradingDayNew
+        WHERE EXTRACT(YEAR FROM TRADINGDATE) BETWEEN {start_year} AND {end_year}
+        AND IfTradingDay = 1 AND IfMonthEnd = 1
+        AND SecuMarket = 83
+        ORDER BY TRADINGDATE
+        )
+        SELECT m.TRADINGDAY, p.INNERCODE, p.TurnoverValuePDayRY
+        FROM MonthData m
+        JOIN JYDB.LC_STIBPerformance p
+        ON m.TRADINGDAY = p.TRADINGDAY
+        ORDER BY m.TRADINGDAY, p.INNERCODE
         """
         df_zb = pd.read_sql(query_zb, self.conn)
         df_kc = pd.read_sql(query_kc, self.conn)
@@ -138,35 +174,55 @@ class DataCleaner:
         return self.data
     
 class DataHandler:
-    def mv_handler(self, start_year: int, end_year: int, stock_pool: pd.DataFrame ):
+    def mv_handler(self, start_year: int, end_year: int, stock_pool: pd.DataFrame, calender: pd.DataFrame):
         """
         处理市值数据, 返还csv表格
         """
         mkv_data = DataFetcher().get_mkv_data(start_year, end_year)
         def get_avg_mkv(df: pd.DataFrame):
             df_sorted = df.sort_values(by=['innercode', 'tradingday'])
-            df_sorted['avg_market_past_year'] = df_sorted.groupby('innercode')['totalmv'].rolling(window=252,min_periods=1).mean().reset_index(level=0,drop=True)
+            df_sorted['avg_market_past_year'] = df_sorted.groupby('innercode')['totalmv'].rolling(window=244,min_periods=1).mean().reset_index(level=0,drop=True)
             return df_sorted
         mkv_data = get_avg_mkv(mkv_data)
-        calender = DataFetcher().get_trading_calender(str(start_year)+'-01-01', str(end_year)+'-01-01')
         step_1 = pd.merge(mkv_data, stock_pool, on='innercode', how='inner')
         step_2 = pd.merge(step_1, calender, on='tradingday', how='inner')[['wind_code', 'tradingday', 'avg_market_past_year']]
         step_2['avg_market_past_year'] = step_2['avg_market_past_year'].apply(lambda x: '{:.2f}'.format(x))
         step_2['tradingday'] = step_2['tradingday'].astype(str)
-        df_final['tradingday'] = df_final['tradingday'].apply(lambda x: x.replace('-', ''))
-        df_final = df_final.pivot(index='wind_code', columns='tradingday', values='avg_market_past_year')
+        step_2['tradingday'] = step_2['tradingday'].apply(lambda x: x.replace('-', ''))
+        df_final = step_2.pivot(index='wind_code', columns='tradingday', values='avg_market_past_year')
         # df_final = df_final.fillna('')
         df_final.columns.name = None
         df_final = df_final.astype(np.float64)
         return df_final
     
-    def mv_rank(self, df: pd.DataFrame, ratio: float = 0.8):
-        """
-        对市值数据进行排序
-        """
-        top_80_percent_stock = df.apply(lambda col: col[col > col.quantile(ratio)].index, axis=0)
-        top_80_percent_stock_df = top_80_percent_stock.apply(pd.Series).T
-        return top_80_percent_stock_df
+    def top_rank(self, df: pd.DataFrame, ratio: float = 0.8):
+         """
+         选择每个月末交易日排名前80%的股票
+         """
+         def top_rank_for_column(col):
+              valid_data = col.dropna()
+              ranked_data = valid_data.rank(ascending=False, method='first')
+              threshold_rank = ratio * len(valid_data)
+              return ranked_data[ranked_data <= threshold_rank].index
+         top_rank_stock = df.apply(top_rank_for_column, axis=0)
+         top_rank_stock_df = top_rank_stock.apply(pd.Series).T
+         return top_rank_stock_df
+
+    
+    def turnoverV_handler(self, start_year: int, end_year: int, stock_pool: pd.DataFrame):
+         
+         """
+         处理日均成交额数据
+         """
+         turnoverV_data = DataFetcher().get_turnoverV_data(start_year, end_year)
+         step_1 = pd.merge(turnoverV_data, stock_pool, on='innercode', how='inner')[['wind_code', 'tradingday', 'turnovervaluepdayry']]
+         step_1['turnovervaluepdayry'] = step_1['turnovervaluepdayry'].apply(lambda x: '{:.2f}'.format(x))
+         step_1['tradingday'] = step_1['tradingday'].astype(str)
+         step_1['tradingday'] = step_1['tradingday'].apply(lambda x: x.replace('-', ''))
+         df_final = step_1.pivot(index='wind_code', columns='tradingday', values='turnovervaluepdayry')
+         df_final.columns.name = None
+         df_final = df_final.astype(np.float64)
+         return df_final
 
         
 
