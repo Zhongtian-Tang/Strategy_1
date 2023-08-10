@@ -134,6 +134,20 @@ class DataFetcher:
         df_final = pd.concat([df_zb, df_kc], axis=0)
         return df_final
     
+    def get_dividend_data(self, start_year: int, end_year: int):
+         query_zb = f"""
+         SELECT INNERCODE, ENDDATE, IFDIVIDEND FROM LC_Dividend
+         WHERE EXTRACT(YEAR FROM ENDDATE) BETWEEN {start_year} AND {end_year}
+         """
+         query_kc = f"""
+         SELECT INNERCODE, ENDDATE, IFDIVIDEND FROM LC_STIBDividend
+         WHERE EXTRACT(YEAR FROM ENDDATE) BETWEEN {start_year} AND {end_year}
+         """
+         df_zb = pd.read_sql(query_zb, self.conn)
+         df_kc = pd.read_sql(query_kc, self.conn)
+         df_final = pd.concat([df_zb, df_kc], axis=0)
+         return df_final
+    
     
 class DataCleaner:
 
@@ -223,6 +237,30 @@ class DataHandler:
          df_final.columns.name = None
          df_final = df_final.astype(np.float64)
          return df_final
+    
+    def dividend_handler(self, start_year: int, end_year: int, stock_pool: pd.DataFrame, calender: pd.DataFrame):
+            """
+            处理分红数据
+            """
+            did_data = DataFetcher().get_dividend_data(start_year, end_year)
+            did_data['year'] = did_data['enddate'].dt.year
+            did_data['status'] = np.where(did_data['ifdividend'].isin([0, 24]), 0, 1)
+            did_data = did_data.groupby(['innercode', 'year'])['status'].sum().reset_index()
+            def rolling_check(group):
+                 return group.rolling(window=4).apply(lambda x: 1 if (x[:-2] > 0).all() else 0, raw=True)
+            did_data['dividend_index'] = did_data.groupby('innercode')['status'].apply(rolling_check).reset_index(level=0, drop=True)
+            did_index = did_data[['innercode', 'year', 'dividend_index']].fillna(0)
+            did_index['year'] = did_index['year'].astype(np.int32)
+            calender['year'] = calender['tradingday'].dt.year
+            step_1 = pd.merge(did_index, calender, on='year', how='inner')
+            step_2 = pd.merge(step_1, stock_pool, on='innercode', how='inner').dropna()[['wind_code', 'tradingday', 'dividend_index']]
+            df_final = step_2.pivot(index='wind_code', columns='tradingday', values='dividend_index')
+            df_final.columns.name = None
+            df_final = df_final.fillna(0)
+            df_final = df_final.astype(np.int32)
+            return df_final
+
+
 
         
 
