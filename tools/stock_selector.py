@@ -188,11 +188,11 @@ class DataCleaner:
         return self.data
     
 class DataHandler:
-    def mv_handler(self, start_year: int, end_year: int, stock_pool: pd.DataFrame, calender: pd.DataFrame):
+    def mv_handler(self, df: pd.DataFrame, stock_pool: pd.DataFrame, calender: pd.DataFrame):
         """
         处理市值数据, 返还csv表格
         """
-        mkv_data = DataFetcher().get_mkv_data(start_year, end_year)
+        mkv_data = df
         def get_avg_mkv(df: pd.DataFrame):
             df_sorted = df.sort_values(by=['innercode', 'tradingday'])
             df_sorted['avg_market_past_year'] = df_sorted.groupby('innercode')['totalmv'].rolling(window=244,min_periods=1).mean().reset_index(level=0,drop=True)
@@ -223,12 +223,12 @@ class DataHandler:
          return top_rank_stock_df
 
     
-    def turnoverV_handler(self, start_year: int, end_year: int, stock_pool: pd.DataFrame):
+    def turnoverV_handler(self, df: pd.DataFrame, stock_pool: pd.DataFrame):
          
          """
          处理日均成交额数据
          """
-         turnoverV_data = DataFetcher().get_turnoverV_data(start_year, end_year)
+         turnoverV_data = df
          step_1 = pd.merge(turnoverV_data, stock_pool, on='innercode', how='inner')[['wind_code', 'tradingday', 'turnovervaluepdayry']]
          step_1['turnovervaluepdayry'] = step_1['turnovervaluepdayry'].apply(lambda x: '{:.2f}'.format(x))
          step_1['tradingday'] = step_1['tradingday'].astype(str)
@@ -238,11 +238,11 @@ class DataHandler:
          df_final = df_final.astype(np.float64)
          return df_final
     
-    def dividend_handler(self, start_year: int, end_year: int, stock_pool: pd.DataFrame, calender: pd.DataFrame):
+    def dividend_handler(self, df: pd.DataFrame, stock_pool: pd.DataFrame, calender: pd.DataFrame):
             """
             处理分红数据
             """
-            did_data = DataFetcher().get_dividend_data(start_year, end_year)
+            did_data = df
             did_data['year'] = did_data['enddate'].dt.year
             did_data['status'] = np.where(did_data['ifdividend'].isin([0, 24]), 0, 1)
             did_data = did_data.groupby(['innercode', 'year'])['status'].sum().reset_index()
@@ -254,6 +254,8 @@ class DataHandler:
             calender['year'] = calender['tradingday'].dt.year
             step_1 = pd.merge(did_index, calender, on='year', how='inner')
             step_2 = pd.merge(step_1, stock_pool, on='innercode', how='inner').dropna()[['wind_code', 'tradingday', 'dividend_index']]
+            step_1['tradingday'] = step_1['tradingday'].astype(str)
+            step_1['tradingday'] = step_1['tradingday'].apply(lambda x: x.replace('-', ''))
             df_final = step_2.pivot(index='wind_code', columns='tradingday', values='dividend_index')
             df_final.columns.name = None
             df_final = df_final.fillna(0)
