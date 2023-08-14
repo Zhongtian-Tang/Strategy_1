@@ -134,19 +134,60 @@ class DataFetcher:
         df_final = pd.concat([df_zb, df_kc], axis=0)
         return df_final
     
-    def get_dividend_data(self, start_year: int, end_year: int):
+    def get_dividend_index_data(self, start_year: int, end_year: int):
          query_zb = f"""
-         SELECT INNERCODE, ENDDATE, IFDIVIDEND FROM LC_Dividend
+         SELECT INNERCODE, ENDDATE, IFDIVIDEND FROM JYDB.LC_Dividend
          WHERE EXTRACT(YEAR FROM ENDDATE) BETWEEN {start_year} AND {end_year}
          """
          query_kc = f"""
-         SELECT INNERCODE, ENDDATE, IFDIVIDEND FROM LC_STIBDividend
+         SELECT INNERCODE, ENDDATE, IFDIVIDEND FROM JYDB.LC_STIBDividend
          WHERE EXTRACT(YEAR FROM ENDDATE) BETWEEN {start_year} AND {end_year}
          """
          df_zb = pd.read_sql(query_zb, self.conn)
          df_kc = pd.read_sql(query_kc, self.conn)
          df_final = pd.concat([df_zb, df_kc], axis=0)
          return df_final
+    
+    def get_payratio_data(self, calender: pd.DataFrame):
+         """
+         获取股利支付率数据
+         """
+         data_strings = calender['tradingday'].dt.strftime('%Y-%m-%d').tolist()
+         dates_for_query = ",".join(["TO_DATE('{}', 'YYYY-MM-DD')".format(date) for date in data_strings])
+         query_zb = f"""
+         SELECT INNERCODE, TRADINGDAY, PE*DividendRatio AS PAYRATIO
+         FROM JYDB.LC_DIndicesForValuation
+         WHERE TRADINGDAY IN ({dates_for_query})
+         ORDER BY TRADINGDAY, INNERCODE
+         """
+         query_kc = f"""
+         SELECT INNERCODE, TRADINGDAY, PETTM*DividendRatioTTM AS PAYRATIO
+         FROM JYDB.LC_STIBDIndiForValue
+         WHERE TRADINGDAY IN ({dates_for_query})
+         ORDER BY TRADINGDAY, INNERCODE
+         """
+         df_zb = pd.read_sql(query_zb, self.conn)
+         df_kc = pd.read_sql(query_kc, self.conn)
+         df_final = pd.concat([df_zb, df_kc], axis=0)
+         return df_final
+    
+    def get_dividend_data(self, start_year:int, end_year:int):
+        query_zb = f"""
+        SELECT COMPANYCODE, ENDDATE, DIVIDENDPS FROM JYDB.LC_MainIndexNew
+        WHERE EXTRACT(YEAR FROM ENDDATE) BETWEEN {start_year} AND {end_year}
+        ORDER BY COMPANYCODE, ENDDATE
+        """
+        query_kc = f"""
+        SELECT COMPANYCODE, ENDDATE, DIVIDENDPS FROM JYDB.LC_STIBMainIndex
+        WHERE EXTRACT(YEAR FROM ENDDATE) BETWEEN {start_year} AND {end_year}
+        ORDER BY COMPANYCODE, ENDDATE    
+        """
+        df_zb = pd.read_sql(query_zb, self.conn)
+        df_kc = pd.read_sql(query_kc, self.conn)
+        df_final = pd.concat([df_zb, df_kc], axis=0)
+        df_final['year'] = df_final['enddate'].dt.year
+        df_final.rename(columns={'enddate': 'tradingday'}, inplace=True)
+        return df_final
     
     
 class DataCleaner:
@@ -195,7 +236,7 @@ class DataHandler:
         mkv_data = df
         def get_avg_mkv(df: pd.DataFrame):
             df_sorted = df.sort_values(by=['innercode', 'tradingday'])
-            df_sorted['avg_market_past_year'] = df_sorted.groupby('innercode')['totalmv'].rolling(window=244,min_periods=1).mean().reset_index(level=0,drop=True)
+            df_sorted['avg_market_past_year'] = df_sorted.groupby('innercode')['totalmv'].rolling(window=240,min_periods=1).mean().reset_index(level=0,drop=True)
             return df_sorted
         mkv_data = get_avg_mkv(mkv_data)
         step_1 = pd.merge(mkv_data, stock_pool, on='innercode', how='inner')
@@ -261,6 +302,37 @@ class DataHandler:
             df_final = df_final.fillna(0)
             df_final = df_final.astype(np.int32)
             return df_final
+    
+    def payratio_handler(self, df: pd.DataFrame, stock_pool: pd.DataFrame):
+            """
+            处理股利支付率数据
+            """
+            payratio_data = df
+            step_1 = pd.merge(payratio_data, stock_pool, on='innercode', how='inner')[['wind_code', 'tradingday', 'payratio']]
+            step_1['payratio'] = step_1['payratio'].apply(lambda x: '{:.2f}'.format(x))
+            step_1['tradingday'] = step_1['tradingday'].astype(str)
+            step_1['tradingday'] = step_1['tradingday'].apply(lambda x: x.replace('-', ''))
+            df_final = step_1.pivot(index='wind_code', columns='tradingday', values='payratio')
+            df_final.columns.name = None
+            df_final = df_final.astype(np.float64)
+            return df_final
+    
+    def dividend_delta_handler(self, df: pd.DataFrame, stock_pool: pd.DataFrame):
+            """
+            处理股利数据
+            """
+            dividend_data = pd.merge(df, stock_pool, on='companycode', how='inner')[['wind_code', 'tradingday', 'year','dividendps']]
+            dividend_year_data = dividend_data.groupby(['wind_code', 'year'])['dividendps'].sum()
+            _index = dividend_year_data.index
+            dividend_year_data = dividend_year_data.reset_index()
+            def rolling_regression(y):
+                 x = np.arange(len(y))
+                 slope, _intercept = np.polyfit(x, y, 1)
+                 return slope
+            dividend_year_delta = dividend_year_data.groupby('wind_code')['dividendps'].rolling(window=3).apply(rolling_regression, raw=True)
+            dividend_year_delta.index = _index
+            return dividend_year_delta
+         
 
 
 
@@ -273,10 +345,19 @@ class StockSelector:
         self.conn = conn
 
 
-    def select_stock(self, date):
+    def select_base_pool(self, mv_data:pd.DataFrame, turnoverV_data:pd.DataFrame, dividend_data:pd.DataFrame):
         """
-        根据不同条件的筛选结果, 筛选交集股票池
+        根据日均市值,成交额与是否连续分红,筛选出基础股票池
         """
+        mv_rank = DataHandler().top_rank(mv_data, 0.8)
+        turnoverV_rank = DataHandler().top_rank(turnoverV_data, 0.8)
+        dividend_rank = dividend_data.apply(lambda col: col[col==1].index).apply(pd.Series).T
+        stock_pool = []
+        for i in range(len(mv_rank.columns)):
+            common_stocks = np.intersect1d(mv_rank.iloc[:,i].dropna(), np.intersect1d(turnoverV_rank.iloc[:,i].dropna(), dividend_rank.iloc[:,i].dropna()))
+            stock_pool.append(common_stocks)
+        final_result = pd.DataFrame(stock_pool).T
+        return final_result
 
     def select_top_market_cap(self, date: str, date_range: str, quantile: float = 0.8):
         """
