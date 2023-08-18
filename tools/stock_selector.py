@@ -295,8 +295,8 @@ class DataHandler:
             calender['year'] = calender['tradingday'].dt.year
             step_1 = pd.merge(did_index, calender, on='year', how='inner')
             step_2 = pd.merge(step_1, stock_pool, on='innercode', how='inner').dropna()[['wind_code', 'tradingday', 'dividend_index']]
-            step_1['tradingday'] = step_1['tradingday'].astype(str)
-            step_1['tradingday'] = step_1['tradingday'].apply(lambda x: x.replace('-', ''))
+            step_2['tradingday'] = step_2['tradingday'].astype(str)
+            step_2['tradingday'] = step_2['tradingday'].apply(lambda x: x.replace('-', ''))
             df_final = step_2.pivot(index='wind_code', columns='tradingday', values='dividend_index')
             df_final.columns.name = None
             df_final = df_final.fillna(0)
@@ -357,6 +357,7 @@ class StockSelector:
             common_stocks = np.intersect1d(mv_rank.iloc[:,i].dropna(), np.intersect1d(turnoverV_rank.iloc[:,i].dropna(), dividend_rank.iloc[:,i].dropna()))
             stock_pool.append(common_stocks)
         final_result = pd.DataFrame(stock_pool).T
+        final_result.columns = mv_rank.columns
         return final_result
     
     def filter_1(self, base_pool: pd.DataFrame, payratio_data: pd.DataFrame, dividend_delta_data: pd.DataFrame, ratio: float = 0.05):
@@ -364,6 +365,7 @@ class StockSelector:
         剔除股利支付率前5%以及前三年股利增长率小于0的股票
         """
         filter_stocks = []
+        payratio_data = payratio_data.set_index('wind_code')
         for date in base_pool.columns:
              base_stocks = base_pool[date].dropna()
              positive_dividend_growth = dividend_delta_data[(dividend_delta_data['year'] == int(date[:4])) & (dividend_delta_data['dividendps'] > 0)]['wind_code'].unique()
@@ -373,8 +375,9 @@ class StockSelector:
              payratio_selected_stocks = sorted_stocks.iloc[top_5_percent_count:].index
              filter_2 = np.intersect1d(base_stocks, payratio_selected_stocks)
              final_filter =np.intersect1d(filter_1, filter_2)
-             filter_stocks.append(final_filter)
-        return filter_stocks
+             filter_stocks.append(pd.Series(final_filter, name=date))
+        df = pd.concat(filter_stocks, axis=1)
+        return df
 
 
         
