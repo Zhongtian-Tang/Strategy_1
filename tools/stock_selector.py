@@ -279,7 +279,7 @@ class DataHandler:
          df_final = df_final.astype(np.float64)
          return df_final
     
-    def dividend_handler(self, df: pd.DataFrame, stock_pool: pd.DataFrame, calender: pd.DataFrame):
+    def dividend_index_handler(self, df: pd.DataFrame, stock_pool: pd.DataFrame, calender: pd.DataFrame):
             """
             处理分红数据
             """
@@ -358,10 +358,31 @@ class StockSelector:
             stock_pool.append(common_stocks)
         final_result = pd.DataFrame(stock_pool).T
         return final_result
+    
+    def filter_1(self, base_pool: pd.DataFrame, payratio_data: pd.DataFrame, dividend_delta_data: pd.DataFrame, ratio: float = 0.05):
+        """
+        剔除股利支付率前5%以及前三年股利增长率小于0的股票
+        """
+        filter_stocks = []
+        for date in base_pool.columns:
+             base_stocks = base_pool[date].dropna()
+             positive_dividend_growth = dividend_delta_data[(dividend_delta_data['year'] == int(date[:4])) & (dividend_delta_data['dividendps'] > 0)]['wind_code'].unique()
+             filter_1 = np.intersect1d(base_stocks, positive_dividend_growth)
+             sorted_stocks = payratio_data[date].dropna().sort_values(ascending=False)
+             top_5_percent_count = int(len(sorted_stocks) * ratio)
+             payratio_selected_stocks = sorted_stocks.iloc[top_5_percent_count:].index
+             filter_2 = np.intersect1d(base_stocks, payratio_selected_stocks)
+             final_filter =np.intersect1d(filter_1, filter_2)
+             filter_stocks.append(final_filter)
+        return filter_stocks
+
+
+        
 
     def select_top_market_cap(self, date: str, date_range: str, quantile: float = 0.8):
         """
         选择不同时间范围, 选取市值前quantile的股票
         """
+        final
 
 
