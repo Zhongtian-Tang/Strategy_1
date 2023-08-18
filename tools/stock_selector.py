@@ -380,12 +380,5 @@ class StockSelector:
         return df
 
 
-        
-
-    def select_top_market_cap(self, date: str, date_range: str, quantile: float = 0.8):
-        """
-        选择不同时间范围, 选取市值前quantile的股票
-        """
-        final
 
 
